@@ -1,0 +1,24 @@
+{
+  "name": "nukeflame/microsoft-mail",
+  "description": "Microsoft Graph mail integration for Laravel",
+  "type": "library",
+  "license": "MIT",
+  "autoload": {
+    "psr-4": {
+      "Nukeflame\\MicrosoftMail\\": "src/"
+    }
+  },
+  "extra": {
+    "laravel": {
+      "providers": [
+        "Nukeflame\\MicrosoftMail\\MicrosoftMailServiceProvider"
+      ]
+    }
+  },
+  "require": {
+    "php": "^8.3",
+    "guzzlehttp/guzzle": "^7.0"
+  },
+  "minimum-stability": "stable",
+  "prefer-stable": true
+}
