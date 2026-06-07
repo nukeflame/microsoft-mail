@@ -151,40 +151,177 @@ class MicrosoftMailService
         $this->graphDelete($token, "/me/messages/{$messageId}");
     }
 
+    /**
+     * Attachments at or below this size can be inlined as base64 in a single sendMail/attachments
+     * call. Microsoft Graph rejects larger file attachments on those endpoints, requiring an
+     * upload session instead.
+     *
+     * @see https://learn.microsoft.com/en-us/graph/outlook-large-attachments
+     */
+    private const INLINE_ATTACHMENT_LIMIT = 3 * 1024 * 1024;
+
+    /** Upload session chunk size — must be a multiple of 320 KiB per Graph's guidance. */
+    private const UPLOAD_CHUNK_SIZE = 320 * 1024 * 12;
+
+    /**
+     * @param  array<string, mixed>  $data  Expects 'attachments' as a list of
+     *                                      {name, contentType, contents} where 'contents' is the
+     *                                      raw (non-base64) file bytes.
+     */
     public function sendMail(int $userId, array $data): void
     {
-        $token = $this->resolveToken($userId);
+        $token       = $this->resolveToken($userId);
+        $attachments = $this->normalizeAttachments($data['attachments'] ?? []);
 
-        $payload = [
-            'message' => [
-                'subject'      => $data['subject'] ?? '(no subject)',
-                'body'         => ['contentType' => 'HTML', 'content' => $data['body'] ?? ''],
-                'toRecipients' => $this->parseRecipients($data['to'] ?? ''),
-            ],
-            'saveToSentItems' => true,
-        ];
-
-        if (! empty($data['cc'])) {
-            $payload['message']['ccRecipients'] = $this->parseRecipients($data['cc']);
+        $hasLargeAttachment = false;
+        foreach ($attachments as $attachment) {
+            if ($attachment['size'] > self::INLINE_ATTACHMENT_LIMIT) {
+                $hasLargeAttachment = true;
+                break;
+            }
         }
 
-        if (! empty($data['bcc'])) {
-            $payload['message']['bccRecipients'] = $this->parseRecipients($data['bcc']);
+        if ($hasLargeAttachment) {
+            $this->sendViaDraftWithAttachments($token, $data, $attachments);
+
+            return;
         }
 
-        if (! empty($data['attachments'])) {
-            $payload['message']['attachments'] = array_map(
-                static fn (array $attachment): array => [
-                    '@odata.type'  => '#microsoft.graph.fileAttachment',
-                    'name'         => $attachment['name'],
-                    'contentType'  => $attachment['contentType'] ?? 'application/octet-stream',
-                    'contentBytes' => $attachment['contentBytes'],
-                ],
-                $data['attachments'],
+        $message = $this->buildMessagePayload($data);
+
+        if ($attachments !== []) {
+            $message['attachments'] = array_map(
+                fn (array $attachment): array => $this->fileAttachmentPayload($attachment),
+                $attachments,
             );
         }
 
-        $this->graphPost($token, '/me/sendMail', $payload);
+        $this->graphPost($token, '/me/sendMail', [
+            'message'         => $message,
+            'saveToSentItems' => true,
+        ]);
+    }
+
+    /**
+     * Sends a message that has at least one attachment too large to inline: create a draft,
+     * attach files individually (large ones via a chunked upload session), then send the draft.
+     *
+     * @param  array<int, array{name: string, contentType: string, contents: string, size: int}>  $attachments
+     */
+    private function sendViaDraftWithAttachments(string $token, array $data, array $attachments): void
+    {
+        $draft     = $this->graphPost($token, '/me/messages', $this->buildMessagePayload($data));
+        $messageId = $draft['id'] ?? null;
+
+        if (! $messageId) {
+            throw new \RuntimeException('Microsoft Graph did not return a draft message id while preparing attachments.');
+        }
+
+        foreach ($attachments as $attachment) {
+            if ($attachment['size'] > self::INLINE_ATTACHMENT_LIMIT) {
+                $this->uploadLargeAttachment($token, $messageId, $attachment);
+            } else {
+                $this->graphPost($token, "/me/messages/{$messageId}/attachments", $this->fileAttachmentPayload($attachment));
+            }
+        }
+
+        $this->graphPost($token, "/me/messages/{$messageId}/send", []);
+    }
+
+    /**
+     * Uploads an attachment that exceeds Graph's inline limit using a resumable upload session,
+     * streaming the raw bytes in fixed-size chunks via the Content-Range header.
+     *
+     * @param  array{name: string, contentType: string, contents: string, size: int}  $attachment
+     */
+    private function uploadLargeAttachment(string $token, string $messageId, array $attachment): void
+    {
+        $session = $this->graphPost($token, "/me/messages/{$messageId}/attachments/createUploadSession", [
+            'AttachmentItem' => [
+                'attachmentType' => 'file',
+                'name'           => $attachment['name'],
+                'contentType'    => $attachment['contentType'],
+                'size'           => $attachment['size'],
+            ],
+        ]);
+
+        $uploadUrl = $session['uploadUrl'] ?? null;
+
+        if (! $uploadUrl) {
+            throw new \RuntimeException("Microsoft Graph did not return an upload session for attachment \"{$attachment['name']}\".");
+        }
+
+        $size   = $attachment['size'];
+        $offset = 0;
+
+        while ($offset < $size) {
+            $length = min(self::UPLOAD_CHUNK_SIZE, $size - $offset);
+
+            // The upload URL is pre-authenticated; sending a Bearer token alongside it is rejected.
+            $this->httpClient->put($uploadUrl, [
+                'headers' => [
+                    'Content-Length' => (string) $length,
+                    'Content-Range'  => sprintf('bytes %d-%d/%d', $offset, $offset + $length - 1, $size),
+                ],
+                'body' => substr($attachment['contents'], $offset, $length),
+            ]);
+
+            $offset += $length;
+        }
+    }
+
+    /**
+     * @param  array<int, array{name?: string, contentType?: string, contents?: string}>  $attachments
+     * @return array<int, array{name: string, contentType: string, contents: string, size: int}>
+     */
+    private function normalizeAttachments(array $attachments): array
+    {
+        return array_map(static function (array $attachment): array {
+            $contents = $attachment['contents'] ?? '';
+
+            return [
+                'name'        => $attachment['name'] ?? 'attachment',
+                'contentType' => $attachment['contentType'] ?? 'application/octet-stream',
+                'contents'    => $contents,
+                'size'        => strlen($contents),
+            ];
+        }, $attachments);
+    }
+
+    /**
+     * @param  array{name: string, contentType: string, contents: string, size: int}  $attachment
+     * @return array<string, string>
+     */
+    private function fileAttachmentPayload(array $attachment): array
+    {
+        return [
+            '@odata.type'  => '#microsoft.graph.fileAttachment',
+            'name'         => $attachment['name'],
+            'contentType'  => $attachment['contentType'],
+            'contentBytes' => base64_encode($attachment['contents']),
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function buildMessagePayload(array $data): array
+    {
+        $message = [
+            'subject'      => $data['subject'] ?? '(no subject)',
+            'body'         => ['contentType' => 'HTML', 'content' => $data['body'] ?? ''],
+            'toRecipients' => $this->parseRecipients($data['to'] ?? ''),
+        ];
+
+        if (! empty($data['cc'])) {
+            $message['ccRecipients'] = $this->parseRecipients($data['cc']);
+        }
+
+        if (! empty($data['bcc'])) {
+            $message['bccRecipients'] = $this->parseRecipients($data['bcc']);
+        }
+
+        return $message;
     }
 
     public function reply(int $userId, string $messageId, string $body, bool $replyAll = false): void
