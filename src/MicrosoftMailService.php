@@ -340,9 +340,12 @@ class MicrosoftMailService
             ? "/me/messages/{$messageId}/replyAll"
             : "/me/messages/{$messageId}/reply";
 
+        // Graph rejects reply/replyAll requests that specify both `comment` and `message`
+        // (ErrorInvalidParameter: "either comment or message should be specified, not both").
+        // We send the full body via `message` so our quoted-original text isn't duplicated
+        // by Graph's own auto-generated quote, which `comment` would append underneath.
         $this->graphPost($token, $endpoint, [
-            'message' => ['body' => ['contentType' => 'HTML', 'content' => $body]],
-            'comment' => $body,
+            'message' => ['body' => ['contentType' => 'HTML', 'content' => $this->htmlFromPlainText($body)]],
         ]);
     }
 
