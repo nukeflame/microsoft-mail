@@ -172,6 +172,18 @@ class MicrosoftMailService
             $payload['message']['bccRecipients'] = $this->parseRecipients($data['bcc']);
         }
 
+        if (! empty($data['attachments'])) {
+            $payload['message']['attachments'] = array_map(
+                static fn (array $attachment): array => [
+                    '@odata.type'  => '#microsoft.graph.fileAttachment',
+                    'name'         => $attachment['name'],
+                    'contentType'  => $attachment['contentType'] ?? 'application/octet-stream',
+                    'contentBytes' => $attachment['contentBytes'],
+                ],
+                $data['attachments'],
+            );
+        }
+
         $this->graphPost($token, '/me/sendMail', $payload);
     }
 
