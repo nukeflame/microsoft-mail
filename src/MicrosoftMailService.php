@@ -8,8 +8,8 @@ use GuzzleHttp\Client;
 
 class MicrosoftMailService
 {
-    private const GRAPH_URL = 'https://graph.microsoft.com/v1.0';
-    private const TOKEN_URL = 'https://login.microsoftonline.com/common/oauth2/v2.0/token';
+    private const GRAPH_URL  = 'https://graph.microsoft.com/v1.0';
+    private const TOKEN_BASE = 'https://login.microsoftonline.com/%s/oauth2/v2.0/token';
 
     private const FOLDER_MAP = [
         'inbox'   => 'inbox',
@@ -247,7 +247,9 @@ class MicrosoftMailService
 
     private function refreshAccessToken(UserMailToken $record): UserMailToken
     {
-        $resp = $this->httpClient->post(self::TOKEN_URL, [
+        $tokenUrl = sprintf(self::TOKEN_BASE, config('services.microsoft_mail.tenant'));
+
+        $resp = $this->httpClient->post($tokenUrl, [
             'form_params' => [
                 'client_id'     => config('services.microsoft_mail.client_id'),
                 'client_secret' => config('services.microsoft_mail.client_secret'),
