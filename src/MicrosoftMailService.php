@@ -110,6 +110,50 @@ class MicrosoftMailService
         return $this->mapMessage($msg, $this->resolveFolderFromParent($msg['parentFolderId'] ?? ''));
     }
 
+    private const ATTACHMENT_SELECT = 'id,name,contentType,size,isInline';
+
+    /**
+     * @return array<int, array{id: string, name: string, contentType: string, size: int, isInline: bool}>
+     */
+    public function getAttachments(int $userId, string $messageId): array
+    {
+        $token = $this->resolveToken($userId);
+        $resp  = $this->graphGet($token, "/me/messages/{$messageId}/attachments", [
+            '$select' => self::ATTACHMENT_SELECT,
+        ]);
+
+        return array_map(static fn (array $a): array => [
+            'id'          => $a['id'],
+            'name'        => $a['name'] ?? 'attachment',
+            'contentType' => $a['contentType'] ?? 'application/octet-stream',
+            'size'        => $a['size'] ?? 0,
+            'isInline'    => $a['isInline'] ?? false,
+        ], $resp['value'] ?? []);
+    }
+
+    /**
+     * Fetches a single attachment's raw bytes for download.
+     *
+     * @return array{name: string, contentType: string, contents: string}
+     */
+    public function downloadAttachment(int $userId, string $messageId, string $attachmentId): array
+    {
+        $token      = $this->resolveToken($userId);
+        $attachment = $this->graphGet($token, "/me/messages/{$messageId}/attachments/{$attachmentId}", [
+            '$select' => 'id,name,contentType,contentBytes',
+        ]);
+
+        if (! isset($attachment['contentBytes'])) {
+            throw new \RuntimeException('This attachment cannot be downloaded.', 422);
+        }
+
+        return [
+            'name'        => $attachment['name'] ?? 'attachment',
+            'contentType' => $attachment['contentType'] ?? 'application/octet-stream',
+            'contents'    => base64_decode($attachment['contentBytes']),
+        ];
+    }
+
     public function markRead(int $userId, string $messageId, bool $read): array
     {
         $token = $this->resolveToken($userId);
