@@ -309,7 +309,7 @@ class MicrosoftMailService
     {
         $message = [
             'subject'      => $data['subject'] ?? '(no subject)',
-            'body'         => ['contentType' => 'HTML', 'content' => $data['body'] ?? ''],
+            'body'         => ['contentType' => 'HTML', 'content' => $this->htmlFromPlainText($data['body'] ?? '')],
             'toRecipients' => $this->parseRecipients($data['to'] ?? ''),
         ];
 
@@ -322,6 +322,15 @@ class MicrosoftMailService
         }
 
         return $message;
+    }
+
+    /**
+     * Converts a plain-text compose body (line breaks only, no markup) into safe HTML so
+     * Outlook/Graph — which renders message bodies as HTML — preserves the author's line breaks.
+     */
+    private function htmlFromPlainText(string $text): string
+    {
+        return nl2br(htmlspecialchars($text, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'));
     }
 
     public function reply(int $userId, string $messageId, string $body, bool $replyAll = false): void
